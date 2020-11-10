@@ -10,40 +10,49 @@
 using namespace std;
 using namespace chrono;
 
-cudaError_t addWithCuda(const float *index, float *delta, float *component, unsigned int size);
-void cuda_cpu();
-double calGaussianFunction(double x);
+cudaError_t caclWithCuda(const float *index, float *res, unsigned int size);
+void cpu_code();
+void gpu_code();
+void getGPUInfo();
+float calGaussianFunction(float x);
 
 __global__ void initDelta(const float *index, float *res)
 {
 	int i = threadIdx.x;
-	res[i] = 10.0 / index[i];
+	res[i] = (float)exp(pow((double)(index[i] + 0.5), 2.0) * -1);
 }
 
 
 int main() {
-	cuda_cpu();
-	/*const int arraySize = 10;
-	const float index[arraySize] = { 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0 };
-	float delta[arraySize] = { 0 };
-	float component[arraySize] = { 0 };
-	cudaError_t cudaStatus = addWithCuda(index, delta, component, arraySize);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "addWithCuda failed!");
-		return 1;
-	}
-	printf("{%d,%d,%d,%d,%d,%d,%d,%d,%d,%d}\n", delta[0], delta[1], delta[2], delta[3], delta[4], delta[5], delta[6], delta[7], delta[8], delta[9]);*/
+	getGPUInfo();
+	cpu_code();
+	gpu_code();
 }
 
+void getGPUInfo() {
+	printf("----------------GPU Info----------------\r\n");
+	cudaError_t cudaStatus;
+	int num;
+	cudaDeviceProp prop;
+	cudaStatus = cudaGetDeviceCount(&num);
+	printf("deviceCount := %d\n", num);
+	for (int i = 0; i < num; i++) {
+		cudaGetDeviceProperties(&prop, i);
+		printf("name:%s\n", prop.name);
+		printf("totalGlobalMem:%d byte\n", prop.totalGlobalMem);
+		printf("multiProcessorCount:%d\n", prop.multiProcessorCount);
+		printf("maxThreadsPerBlock:%d\n", prop.maxThreadsPerBlock);
+	}
+}
 
-void cuda_cpu()
+void cpu_code()
 {
-	double cost;
 	const int arraySize = 6;
-	const double a[arraySize] = { -3, -2, -1, 0, 1, 2};
-	double result = 0;
-	double temp = 0;
-	double x = 0;
+	float a[arraySize] = { -3, -2, -1, 0, 1, 2 };
+	float sum = 0;
+	float temp = 0;
+	float x = 0;
+	auto init_time = system_clock::now();
 	printf("----------------CPU code----------------\r\n");
 	for (int i = 0; i < arraySize; i++)
 	{
@@ -52,26 +61,52 @@ void cuda_cpu()
 		temp = calGaussianFunction(x);
 		printf("Step %d - temp:%f\r\n", i, temp);
 		auto end = system_clock::now();
-		result += temp;
-		printf("Step %d - sum:%f\r\n",i, result);
+		sum += temp;
+		printf("Step %d - sum:%f\r\n", i, sum);
 		auto duration = duration_cast<microseconds>(end - start);
-		double t = double(duration.count()) * microseconds::period::num / microseconds::period::den;
+		float t = float(duration.count()) * microseconds::period::num / microseconds::period::den;
 		printf("Step %d - time: %f\r\n\r\n", i, t);
 	}
+	auto final_time = system_clock::now();
+	auto duration = duration_cast<microseconds>(final_time - init_time);
+	float t = float(duration.count()) * microseconds::period::num / microseconds::period::den;
+	printf("# Total time: %f\r\n\r\n", t);
+	printf("# Area:%f\r\n\r\n", sum);
 }
 
-double calGaussianFunction(double x)
+void gpu_code() {
+	printf("----------------GPU code----------------\r\n");
+	const int arraySize = 6;
+	float x[arraySize] = { -3, -2, -1, 0, 1, 2 };
+	float res[arraySize] = { 0 };
+	float sum = 0;
+	cudaError_t cudaStatus = caclWithCuda(x, res, arraySize);
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "addWithCuda failed!");
+		return;
+	}
+	cudaStatus = cudaDeviceReset();
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaDeviceReset failed!");
+		return;
+	}
+	for (int i = 0; i < arraySize; i++) {
+		sum += res[i];
+	}
+	printf("# Area:%f\r\n", sum);
+}
+
+float calGaussianFunction(float x)
 {
-	double pow_result = pow(x, 2.0) * -1;
+	float pow_result = pow(x, 2.0) * -1;
 	return exp(pow_result);
 }
 
 //main algorithm
-cudaError_t addWithCuda(const float *index, float *delta, float *component, unsigned int size)
+cudaError_t caclWithCuda(const float *index, float *res, unsigned int size)
 {
 	float *dev_index = 0;
-	float *dev_delta = 0;
-	float *dev_component = 0;
+	float *dev_res = 0;
 	cudaError_t cudaStatus;
 
 	// Choose which GPU to run on, change this on a multi-GPU system.
@@ -88,13 +123,7 @@ cudaError_t addWithCuda(const float *index, float *delta, float *component, unsi
 		goto Error;
 	}
 
-	cudaStatus = cudaMalloc((void**)&dev_delta, size * sizeof(float));
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMalloc failed!");
-		goto Error;
-	}
-
-	cudaStatus = cudaMalloc((void**)&dev_component, size * sizeof(float));
+	cudaStatus = cudaMalloc((void**)&dev_res, size * sizeof(float));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
 		goto Error;
@@ -105,8 +134,16 @@ cudaError_t addWithCuda(const float *index, float *delta, float *component, unsi
 		fprintf(stderr, "cudaMemcpy failed!");
 		goto Error;
 	}
-
-	initDelta <<<1, size>>> (dev_index, dev_delta);
+	auto start = system_clock::now();
+	// <<<blocks, threads>>>
+	// initDelta <<<size, 1>>> (dev_index, dev_res);
+	// initDelta <<<2, 3>>> (dev_index, dev_res);
+	// initDelta <<<3, 2>>> (dev_index, dev_res);
+	initDelta <<<1, size>>> (dev_index, dev_res);
+	auto end = system_clock::now();
+	auto duration = duration_cast<microseconds>(end - start);
+	float t = float(duration.count()) * microseconds::period::num / microseconds::period::den;
+	printf("# Total time: %f\r\n\r\n", t);
 
 	cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
@@ -121,7 +158,7 @@ cudaError_t addWithCuda(const float *index, float *delta, float *component, unsi
 	}
 
 	// Copy output vector from GPU buffer to host memory.
-	cudaStatus = cudaMemcpy(delta, dev_delta, size * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaStatus = cudaMemcpy(res, dev_res, size * sizeof(float), cudaMemcpyDeviceToHost);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy failed!");
 		goto Error;
@@ -129,8 +166,7 @@ cudaError_t addWithCuda(const float *index, float *delta, float *component, unsi
 
 Error:
 	cudaFree(dev_index);
-	cudaFree(dev_delta);
-	cudaFree(dev_component);
+	cudaFree(dev_res);
 
 	return cudaStatus;
 }
